@@ -149,11 +149,11 @@ fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, Er
 
 fn parse_firewall_rules(firewall_rules: &String, ip: &String) -> Result<Vec<FirewallRule>, std::string::ParseError> {
     let mut rules: Vec<FirewallRule> = vec![];
-    let split_rules = firewall_rules.split(";");
+    let split_rules = firewall_rules.split(';');
     for rule in split_rules {
         debug!("rule: {:?}", rule);
         let mut protocol: &str = "tcp";
-        for (i, v) in rule.split(":").enumerate() {
+        for (i, v) in rule.split(':').enumerate() {
             if i == 0 {
                 // first element is the protocol
                 protocol = v;
@@ -169,7 +169,7 @@ fn parse_firewall_rules(firewall_rules: &String, ip: &String) -> Result<Vec<Fire
                     })
                 }
             } else {
-                for p in v.split(",") {
+                for p in v.split(',') {
                     rules.push(FirewallRule {
                         description: Some(format!("{}-{}", protocol, p)),
                         destination_ips: vec![],
