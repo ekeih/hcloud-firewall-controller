@@ -147,7 +147,7 @@ fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, Er
     Ok(firewalls)
 }
 
-fn parse_firewall_rules(firewall_rules: &String, ip: &String) -> Result<Vec<FirewallRule>, std::string::ParseError> {
+fn parse_firewall_rules(firewall_rules: &str, ip: &String) -> Result<Vec<FirewallRule>, std::string::ParseError> {
     let mut rules: Vec<FirewallRule> = vec![];
     let split_rules = firewall_rules.split(';');
     for rule in split_rules {
