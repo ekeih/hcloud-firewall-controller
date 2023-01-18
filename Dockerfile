@@ -5,4 +5,4 @@ RUN cargo install --locked --path .
 
 FROM debian:11.6-slim
 COPY --from=builder /usr/local/cargo/bin/hcloud-firewall-controller /usr/local/bin/hcloud-firewall-controller
-CMD ["hcloud-firewall-controller"]
+ENTRYPOINT ["hcloud-firewall-controller"]
