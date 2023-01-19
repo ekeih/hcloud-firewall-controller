@@ -1,6 +1,7 @@
 FROM rust:1.66.1 as builder
 WORKDIR /usr/src/hcloud-firewall-controller
-COPY . .
+COPY Cargo.* .
+COPY src src
 RUN cargo install --locked --path .
 
 FROM debian:11.6-slim
