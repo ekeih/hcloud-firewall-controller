@@ -44,8 +44,27 @@ struct Config {
     ip_endpoint: String,
     #[arg(short, long, default_value_t = String::from("hcloud-firewall-controller"), help = "Name of the firewall to create", env = "HFC_FIREWALL_NAME")]
     firewall_name: String,
-    #[arg(short = 'w', long, help = "Firewall rules to apply, e.g. 'icmp;tcp:80,443;udp:51820'", env = "HFC_FIREWALL_RULES")]
-    firewall_rules: String,
+    #[arg(long, help = "Allow ICMP traffic", env = "HFC_ICMP")]
+    icmp: bool,
+    #[arg(long, help = "Allow GRE traffic", env = "HFC_GRE")]
+    gre: bool,
+    #[arg(long, help = "Allow ESP traffic", env = "HFC_ESP")]
+    esp: bool,
+    #[arg(
+        long,
+        value_name = "PORT | PORT RANGE",
+        use_value_delimiter = true,
+        help = "Comma separated list of TCP ports or port ranges to allow traffic for, e.g. '80', '80,443', '80-85' or 80,443-450'. Alternatively the parameter can be specified multiple times.",
+        env = "HFC_TCP"
+    )]
+    tcp: Vec<String>,
+    #[arg(
+        long,
+        value_name = "PORT | PORT RANGE",
+        help = "Comma separated list of UDP ports or port ranges to allow traffic for, see --tcp for examples. Alternatively the parameter can be specified multiple times.",
+        env = "HFC_UDP"
+    )]
+    udp: Vec<String>,
     #[arg(short, long, default_value_t = 60, help = "Reconciliation interval in seconds", env = "HFC_RECONCILIATION_INTERVAL")]
     reconciliation_interval: u64,
 }
@@ -80,18 +99,11 @@ fn controller(config: &Config) {
             }
         };
 
-        let rules = match parse_firewall_rules(&config.firewall_rules, &ip) {
-            Ok(rules) => rules,
-            Err(e) => {
-                error!("{:?}", e);
-                thread::sleep(time::Duration::from_secs(10));
-                continue;
-            }
-        };
+        let rules = build_firewall_rules(&config.icmp, &config.gre, &config.esp, &config.tcp, &config.udp, &ip);
 
         if fw.rules != rules {
             match update_hcloud_firewall(&client, &config.hcloud_token, fw.id, rules) {
-                Ok(_) => info!("Rules of '{}' have been updates for {}", config.firewall_name, ip),
+                Ok(_) => info!("Rules of '{}' have been updated for {}", config.firewall_name, ip),
                 Err(e) => {
                     error!("{:?}", e);
                     thread::sleep(time::Duration::from_secs(10));
@@ -147,47 +159,70 @@ fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, Er
     Ok(firewalls)
 }
 
-fn parse_firewall_rules(firewall_rules: &str, ip: &String) -> Result<Vec<FirewallRule>, std::string::ParseError> {
-    let mut rules: Vec<FirewallRule> = vec![];
-    let split_rules = firewall_rules.split(';');
-    for rule in split_rules {
-        debug!("rule: {:?}", rule);
-        let mut protocol: &str = "tcp";
-        for (i, v) in rule.split(':').enumerate() {
-            if i == 0 {
-                // first element is the protocol
-                protocol = v;
-                if !(["tcp", "udp"].contains(&v.to_lowercase().as_str())) {
-                    // if it is neither tcp nor udp it has no port
-                    rules.push(FirewallRule {
-                        description: Some(v.to_string()),
-                        destination_ips: vec![],
-                        direction: "in".to_string(),
-                        port: None,
-                        protocol: v.to_string(),
-                        source_ips: vec![format!("{}/32", ip)],
-                    })
-                }
-            } else {
-                for p in v.split(',') {
-                    rules.push(FirewallRule {
-                        description: Some(format!("{}-{}", protocol, p)),
-                        destination_ips: vec![],
-                        direction: "in".to_string(),
-                        port: Some(p.to_string()),
-                        protocol: protocol.to_string(),
-                        source_ips: vec![format!("{}/32", ip)],
-                    });
-                }
-            }
-        }
-    }
-    Ok(rules)
-}
-
 fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, firewall_rules: Vec<FirewallRule>) -> Result<(), Error> {
     let mut params = HashMap::new();
     params.insert("rules", firewall_rules);
     client.post(format!("{HCLOUD_API}/firewalls/{firewall_id}/actions/set_rules")).bearer_auth(token).json(&params).send()?;
     Ok(())
+}
+
+fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &Vec<String>, udp: &Vec<String>, ip: &String) -> Vec<FirewallRule> {
+    let mut rules: Vec<FirewallRule> = vec![];
+
+    if *icmp {
+        rules.push(FirewallRule {
+            description: Some("ICMP".to_string()),
+            destination_ips: vec![],
+            direction: "in".to_string(),
+            port: None,
+            protocol: "icmp".to_string(),
+            source_ips: vec![format!("{}/32", ip)],
+        })
+    };
+
+    if *gre {
+        rules.push(FirewallRule {
+            description: Some("GRE".to_string()),
+            destination_ips: vec![],
+            direction: "in".to_string(),
+            port: None,
+            protocol: "gre".to_string(),
+            source_ips: vec![format!("{}/32", ip)],
+        })
+    };
+
+    if *esp {
+        rules.push(FirewallRule {
+            description: Some("ESP".to_string()),
+            destination_ips: vec![],
+            direction: "in".to_string(),
+            port: None,
+            protocol: "esp".to_string(),
+            source_ips: vec![format!("{}/32", ip)],
+        })
+    };
+
+    for port in tcp {
+        rules.push(FirewallRule {
+            description: Some(format!("TCP-{port}")),
+            destination_ips: vec![],
+            direction: "in".to_string(),
+            port: Some(port.to_string()),
+            protocol: "tcp".to_string(),
+            source_ips: vec![format!("{}/32", ip)],
+        })
+    }
+
+    for port in udp {
+        rules.push(FirewallRule {
+            description: Some(format!("UDP-{port}")),
+            destination_ips: vec![],
+            direction: "in".to_string(),
+            port: Some(port.to_string()),
+            protocol: "udp".to_string(),
+            source_ips: vec![format!("{}/32", ip)],
+        })
+    }
+
+    rules
 }
