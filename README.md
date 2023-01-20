@@ -10,7 +10,7 @@ Please be aware that IP based firewalling alone is not a sufficient method to se
 By default the controller creates a new firewall `hcloud-firewall-controller` with the defined rules without applying the firewall to any servers. You can apply the firewall to servers manually or with an infastructure provisioning tool like Terraform based on the firewall ID. The controller prints the firewall ID each reconciliation loop.
 
 ```
-Usage: hcloud-firewall-controller [OPTIONS] --hcloud-token <HCLOUD_TOKEN> --firewall-rules <FIREWALL_RULES>
+Usage: hcloud-firewall-controller [OPTIONS] --hcloud-token <HCLOUD_TOKEN>
 
 Options:
   -t, --hcloud-token <HCLOUD_TOKEN>
@@ -19,10 +19,20 @@ Options:
           Endpoint to query your public IP from [env: HFC_IP_ENDPOINT=] [default: https://ip.fotoallerlei.com]
   -f, --firewall-name <FIREWALL_NAME>
           Name of the firewall to create [env: HFC_FIREWALL_NAME=] [default: hcloud-firewall-controller]
-  -w, --firewall-rules <FIREWALL_RULES>
-          Firewall rules to apply, e.g. 'icmp;tcp:80,443;udp:51820' [env: HFC_FIREWALL_RULES=]
+      --icmp
+          Allow ICMP traffic [env: HFC_ICMP=]
+      --gre
+          Allow GRE traffic [env: HFC_GRE=]
+      --esp
+          Allow ESP traffic [env: HFC_ESP=]
+      --tcp <PORT | PORT RANGE>
+          Comma separated list of TCP ports or port ranges to allow traffic for, e.g. '80', '80,443', '80-85' or 80,443-450'. Alternatively the parameter can be specified multiple times. [env: HFC_TCP=]
+      --udp <PORT | PORT RANGE>
+          Comma separated list of UDP ports or port ranges to allow traffic for, see --tcp for examples. Alternatively the parameter can be specified multiple times. [env: HFC_UDP=]
   -r, --reconciliation-interval <RECONCILIATION_INTERVAL>
           Reconciliation interval in seconds [env: HFC_RECONCILIATION_INTERVAL=] [default: 60]
+      --run-once
+          Run only once and exit, useful if run by cron or other tools [env: HFC_RUN_ONCE=]
   -h, --help
           Print help
   -V, --version
