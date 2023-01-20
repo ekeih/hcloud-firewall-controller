@@ -38,8 +38,15 @@ struct FirewallRule {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Config {
-    #[arg(short = 't', long, help = "Hetzner Cloud API token with read and write permissions", env = "HFC_HCLOUD_TOKEN", hide_env_values = true)]
-    hcloud_token: String,
+    #[arg(
+        short = 't',
+        long,
+        use_value_delimiter = true,
+        help = "Hetzner Cloud API token with read and write permissions, can be specified multuple times or passed as comma separated list to manage several projects",
+        env = "HFC_HCLOUD_TOKEN",
+        hide_env_values = true
+    )]
+    hcloud_token: Vec<String>,
     #[arg(short, long, default_value_t = String::from("https://ip.fotoallerlei.com"), help = "Endpoint to query your public IP from", env = "HFC_IP_ENDPOINT")]
     ip_endpoint: String,
     #[arg(short, long, default_value_t = String::from("hcloud-firewall-controller"), help = "Name of the firewall to create", env = "HFC_FIREWALL_NAME")]
@@ -104,15 +111,18 @@ fn reconcile(config: &Config, client: &Client) -> Result<(), reqwest::Error> {
     let ip = get_ip(client, &config.ip_endpoint)?;
     let rules = build_firewall_rules(&config.icmp, &config.gre, &config.esp, &config.tcp, &config.udp, &ip);
 
-    let fw = get_or_create_firewall(client, &config.hcloud_token, &config.firewall_name)?;
+    for token in &config.hcloud_token {
+        let fw = get_or_create_firewall(client, token, &config.firewall_name)?;
 
-    if fw.rules != rules {
-        match update_hcloud_firewall(client, &config.hcloud_token, fw.id, rules) {
-            Ok(_) => info!("Rules of '{}' (id: {}) have been updated for {}", config.firewall_name, fw.id, ip),
-            Err(e) => return Err(e),
-        };
-    } else {
-        info!("Rules of '{}' (id: {}) are already up to date for {}", config.firewall_name, fw.id, ip)
+        if fw.rules != rules {
+            match update_hcloud_firewall(client, token, fw.id, &rules) {
+                Ok(_) => info!("Rules of '{}' (id: {}) have been updated for {}", config.firewall_name, fw.id, ip),
+                Err(e) => return Err(e),
+            };
+        } else {
+            info!("Rules of '{}' (id: {}) are already up to date for {}", config.firewall_name, fw.id, ip)
+        }
+        thread::sleep(time::Duration::from_millis(500));
     }
     Ok(())
 }
@@ -157,7 +167,7 @@ fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, re
     Ok(firewalls)
 }
 
-fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, firewall_rules: Vec<FirewallRule>) -> Result<(), reqwest::Error> {
+fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, firewall_rules: &Vec<FirewallRule>) -> Result<(), reqwest::Error> {
     let mut params = HashMap::new();
     params.insert("rules", firewall_rules);
     client.post(format!("{HCLOUD_API}/firewalls/{firewall_id}/actions/set_rules")).bearer_auth(token).json(&params).send()?;
