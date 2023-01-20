@@ -108,11 +108,11 @@ fn reconcile(config: &Config, client: &Client) -> Result<(), reqwest::Error> {
 
     if fw.rules != rules {
         match update_hcloud_firewall(client, &config.hcloud_token, fw.id, rules) {
-            Ok(_) => info!("Rules of '{}' have been updated for {}", config.firewall_name, ip),
+            Ok(_) => info!("Rules of '{}' (id: {}) have been updated for {}", config.firewall_name, fw.id, ip),
             Err(e) => return Err(e),
         };
     } else {
-        info!("Rules of '{}' are already up to date for {}", config.firewall_name, ip)
+        info!("Rules of '{}' (id: {}) are already up to date for {}", config.firewall_name, fw.id, ip)
     }
     Ok(())
 }
