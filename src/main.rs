@@ -1,9 +1,9 @@
 use clap::Parser;
 use env_logger::Env;
-use log::{debug, error, info, log_enabled, Level};
+use log::{debug, info, log_enabled, Level};
 use reqwest::blocking::Client;
-use reqwest::Error;
 use serde::{Deserialize, Serialize};
+use std::process::ExitCode;
 use std::{collections::HashMap, thread, time};
 
 const HCLOUD_API: &str = "https://api.hetzner.cloud/v1";
@@ -67,63 +67,61 @@ struct Config {
     udp: Vec<String>,
     #[arg(short, long, default_value_t = 60, help = "Reconciliation interval in seconds", env = "HFC_RECONCILIATION_INTERVAL")]
     reconciliation_interval: u64,
+    #[arg(long, help = "Run only once and exit, useful if run by cron or other tools", env = "HFC_RUN_ONCE")]
+    run_once: bool,
 }
 
-fn main() {
+fn main() -> ExitCode {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let config = Config::parse();
-    info!("hcloud-firewall-controller started with a reconciliation interval of {} seconds", config.reconciliation_interval);
-    controller(&config);
+    let client = Client::new();
+    if config.run_once {
+        match reconcile(&config, &client) {
+            Ok(_) => debug!("Reconciliation succeeded"),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+    } else {
+        controller(&config, &client);
+    }
+    ExitCode::SUCCESS
 }
 
-fn controller(config: &Config) {
-    let client = Client::new();
+fn controller(config: &Config, client: &Client) {
     loop {
         debug!("Reconciliation loop started");
-
-        let ip = match get_ip(&client, &config.ip_endpoint) {
-            Ok(ip) => ip,
-            Err(e) => {
-                error!("{:?}", e);
-                thread::sleep(time::Duration::from_secs(10));
-                continue;
-            }
+        match reconcile(config, client) {
+            Ok(_) => debug!("Reconciliation loop finished, sleeping for {} seconds", config.reconciliation_interval),
+            Err(e) => eprintln!("{e}"),
         };
-
-        let fw = match get_or_create_firewall(&client, &config.hcloud_token, &config.firewall_name) {
-            Ok(fw) => fw,
-            Err(e) => {
-                error!("{:?}", e);
-                thread::sleep(time::Duration::from_secs(10));
-                continue;
-            }
-        };
-
-        let rules = build_firewall_rules(&config.icmp, &config.gre, &config.esp, &config.tcp, &config.udp, &ip);
-
-        if fw.rules != rules {
-            match update_hcloud_firewall(&client, &config.hcloud_token, fw.id, rules) {
-                Ok(_) => info!("Rules of '{}' have been updated for {}", config.firewall_name, ip),
-                Err(e) => {
-                    error!("{:?}", e);
-                    thread::sleep(time::Duration::from_secs(10));
-                    continue;
-                }
-            };
-        } else {
-            info!("Rules of '{}' are already up to date for {}", config.firewall_name, ip)
-        }
-
-        debug!("Reconciliation loop finished, sleeping for {} seconds", config.reconciliation_interval);
         thread::sleep(time::Duration::from_secs(config.reconciliation_interval));
     }
 }
 
-fn get_ip(client: &Client, ip_endpont: &String) -> Result<String, Error> {
+fn reconcile(config: &Config, client: &Client) -> Result<(), reqwest::Error> {
+    let ip = get_ip(client, &config.ip_endpoint)?;
+    let rules = build_firewall_rules(&config.icmp, &config.gre, &config.esp, &config.tcp, &config.udp, &ip);
+
+    let fw = get_or_create_firewall(client, &config.hcloud_token, &config.firewall_name)?;
+
+    if fw.rules != rules {
+        match update_hcloud_firewall(client, &config.hcloud_token, fw.id, rules) {
+            Ok(_) => info!("Rules of '{}' have been updated for {}", config.firewall_name, ip),
+            Err(e) => return Err(e),
+        };
+    } else {
+        info!("Rules of '{}' are already up to date for {}", config.firewall_name, ip)
+    }
+    Ok(())
+}
+
+fn get_ip(client: &Client, ip_endpont: &String) -> Result<String, reqwest::Error> {
     Ok(client.get(ip_endpont).send()?.text()?.trim().to_string())
 }
 
-fn get_or_create_firewall(client: &Client, token: &String, firewall_name: &String) -> Result<Firewall, Error> {
+fn get_or_create_firewall(client: &Client, token: &String, firewall_name: &String) -> Result<Firewall, reqwest::Error> {
     let firewalls: Firewalls = get_hcloud_firewalls(client, token)?;
     for firewall in firewalls.firewalls {
         if firewall.name == *firewall_name {
@@ -140,7 +138,7 @@ fn get_or_create_firewall(client: &Client, token: &String, firewall_name: &Strin
     }
 }
 
-fn create_hcloud_firewall(client: &Client, token: &String, firewall_name: &String) -> Result<Firewall, Error> {
+fn create_hcloud_firewall(client: &Client, token: &String, firewall_name: &String) -> Result<Firewall, reqwest::Error> {
     let mut params = HashMap::new();
     params.insert("name", firewall_name);
     let firewall_response: FirewallResponse = client.post(format!("{HCLOUD_API}/firewalls")).bearer_auth(token).json(&params).send()?.json()?;
@@ -149,7 +147,7 @@ fn create_hcloud_firewall(client: &Client, token: &String, firewall_name: &Strin
     Ok(firewall)
 }
 
-fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, Error> {
+fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, reqwest::Error> {
     let firewalls: Firewalls = client.get(format!("{HCLOUD_API}/firewalls")).bearer_auth(token).send()?.json()?;
     if log_enabled!(Level::Debug) {
         for firewall in &firewalls.firewalls {
@@ -159,7 +157,7 @@ fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, Er
     Ok(firewalls)
 }
 
-fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, firewall_rules: Vec<FirewallRule>) -> Result<(), Error> {
+fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, firewall_rules: Vec<FirewallRule>) -> Result<(), reqwest::Error> {
     let mut params = HashMap::new();
     params.insert("rules", firewall_rules);
     client.post(format!("{HCLOUD_API}/firewalls/{firewall_id}/actions/set_rules")).bearer_auth(token).json(&params).send()?;
