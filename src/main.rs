@@ -1,12 +1,23 @@
 use clap::Parser;
 use env_logger::Env;
-use log::{debug, info, log_enabled, Level};
+use log::{debug, error, info, log_enabled, Level};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::fmt::Display;
 use std::process::ExitCode;
 use std::{collections::HashMap, thread, time};
 
 const HCLOUD_API: &str = "https://api.hetzner.cloud/v1";
+
+#[derive(Debug)]
+struct HcloudError(String);
+impl std::error::Error for HcloudError {}
+impl Display for HcloudError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[Error from Hetzner Cloud API] {}", self.0)
+    }
+}
 
 #[derive(Clone, Deserialize, Debug)]
 struct Firewalls {
@@ -35,28 +46,39 @@ struct FirewallRule {
     source_ips: Vec<String>,
 }
 
+#[derive(Deserialize, Debug)]
+struct FirewallRuleResponse {
+    error: Option<FirewallRuleError>,
+}
+
+#[derive(Deserialize, Debug)]
+struct FirewallRuleError {
+    code: String,
+    message: String,
+    details: FirewallRuleErrorDetails,
+}
+
+#[derive(Deserialize, Debug)]
+struct FirewallRuleErrorDetails {
+    fields: Vec<Value>,
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Config {
+    #[arg(short = '1', long, help = "Run only once and exit, useful if run by cron or other tools", env = "HFC_RUN_ONCE")]
+    run_once: bool,
     #[arg(
         short = 't',
         long,
         use_value_delimiter = true,
-        help = "Hetzner Cloud API token with read and write permissions, can be specified multuple times or passed as comma separated list to manage several projects",
+        help = "Hetzner Cloud API token with read and write permissions, can be specified multiple times or passed as comma separated list to manage several projects",
         env = "HFC_HCLOUD_TOKEN",
         hide_env_values = true
     )]
     hcloud_token: Vec<String>,
-    #[arg(short, long, default_value_t = String::from("https://ip.fotoallerlei.com"), help = "Endpoint to query your public IP from", env = "HFC_IP_ENDPOINT")]
-    ip_endpoint: String,
     #[arg(short, long, default_value_t = String::from("hcloud-firewall-controller"), help = "Name of the firewall to create", env = "HFC_FIREWALL_NAME")]
     firewall_name: String,
-    #[arg(long, help = "Allow ICMP traffic", env = "HFC_ICMP")]
-    icmp: bool,
-    #[arg(long, help = "Allow GRE traffic", env = "HFC_GRE")]
-    gre: bool,
-    #[arg(long, help = "Allow ESP traffic", env = "HFC_ESP")]
-    esp: bool,
     #[arg(
         long,
         value_name = "PORT | PORT RANGE",
@@ -72,10 +94,23 @@ struct Config {
         env = "HFC_UDP"
     )]
     udp: Vec<String>,
+    #[arg(long, help = "Allow ICMP traffic", env = "HFC_ICMP")]
+    icmp: bool,
+    #[arg(long, help = "Allow GRE traffic", env = "HFC_GRE")]
+    gre: bool,
+    #[arg(long, help = "Allow ESP traffic", env = "HFC_ESP")]
+    esp: bool,
+    #[arg(
+        long,
+        value_name = "STATIC IP",
+        help = "Comma separated list of static IP addresses in CIDR notation to add to all firewall rules in addition to dynamically discovered IP addresses. Alternatively the parameter can be specified multiple times. The Hetzner Cloud API requires that the IP is the network id of the specified network, so 127.0.0.0/24 would work while 127.0.0.1/24 would fail.",
+        env = "HFC_IP"
+    )]
+    ip: Vec<String>,
     #[arg(short, long, default_value_t = 60, help = "Reconciliation interval in seconds", env = "HFC_RECONCILIATION_INTERVAL")]
     reconciliation_interval: u64,
-    #[arg(long, help = "Run only once and exit, useful if run by cron or other tools", env = "HFC_RUN_ONCE")]
-    run_once: bool,
+    #[arg(short, long, default_value_t = String::from("https://ip.fotoallerlei.com"), help = "Endpoint to query your public IP from", env = "HFC_IP_ENDPOINT")]
+    ip_endpoint: String,
 }
 
 fn main() -> ExitCode {
@@ -86,7 +121,7 @@ fn main() -> ExitCode {
         match reconcile(&config, &client) {
             Ok(_) => debug!("Reconciliation succeeded"),
             Err(e) => {
-                eprintln!("{e}");
+                error!("{e}");
                 return ExitCode::FAILURE;
             }
         };
@@ -101,34 +136,45 @@ fn controller(config: &Config, client: &Client) {
         debug!("Reconciliation loop started");
         match reconcile(config, client) {
             Ok(_) => debug!("Reconciliation loop finished, sleeping for {} seconds", config.reconciliation_interval),
-            Err(e) => eprintln!("{e}"),
+            Err(e) => error!("{e}"),
         };
         thread::sleep(time::Duration::from_secs(config.reconciliation_interval));
     }
 }
 
-fn reconcile(config: &Config, client: &Client) -> Result<(), reqwest::Error> {
-    let ip = get_ip(client, &config.ip_endpoint)?;
-    let rules = build_firewall_rules(&config.icmp, &config.gre, &config.esp, &config.tcp, &config.udp, &ip);
+fn reconcile(config: &Config, client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    let ips = build_ips(client, &config.ip_endpoint, &config.ip)?;
+    let rules = build_firewall_rules(&config.icmp, &config.gre, &config.esp, &config.tcp, &config.udp, &ips);
 
     for token in &config.hcloud_token {
         let fw = get_or_create_firewall(client, token, &config.firewall_name)?;
 
         if fw.rules != rules {
             match update_hcloud_firewall(client, token, fw.id, &rules) {
-                Ok(_) => info!("Rules of '{}' (id: {}) have been updated for {}", config.firewall_name, fw.id, ip),
-                Err(e) => return Err(e),
+                Ok(_) => info!("Rules of '{}' (id: {}) have been updated for {:?}", config.firewall_name, fw.id, ips),
+                Err(e) => {
+                    error!("{e}");
+                    continue;
+                }
             };
         } else {
-            info!("Rules of '{}' (id: {}) are already up to date for {}", config.firewall_name, fw.id, ip)
+            info!("Rules of '{}' (id: {}) are already up to date for {:?}", config.firewall_name, fw.id, ips)
         }
         thread::sleep(time::Duration::from_millis(500));
     }
     Ok(())
 }
 
+fn build_ips(client: &Client, ip_endpont: &String, static_ips: &[String]) -> Result<Vec<String>, reqwest::Error> {
+    let ip = get_ip(client, ip_endpont)?;
+    let mut ips = static_ips.to_owned();
+    ips.push(ip);
+    ips.sort();
+    Ok(ips)
+}
+
 fn get_ip(client: &Client, ip_endpont: &String) -> Result<String, reqwest::Error> {
-    Ok(client.get(ip_endpont).send()?.text()?.trim().to_string())
+    Ok(format!("{}/32", client.get(ip_endpont).send()?.text()?.trim()))
 }
 
 fn get_or_create_firewall(client: &Client, token: &String, firewall_name: &String) -> Result<Firewall, reqwest::Error> {
@@ -167,14 +213,24 @@ fn get_hcloud_firewalls(client: &Client, token: &String) -> Result<Firewalls, re
     Ok(firewalls)
 }
 
-fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, firewall_rules: &Vec<FirewallRule>) -> Result<(), reqwest::Error> {
+fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, firewall_rules: &[FirewallRule]) -> Result<(), Box<dyn std::error::Error>> {
     let mut params = HashMap::new();
     params.insert("rules", firewall_rules);
-    client.post(format!("{HCLOUD_API}/firewalls/{firewall_id}/actions/set_rules")).bearer_auth(token).json(&params).send()?;
+    let response: FirewallRuleResponse = client
+        .post(format!("{HCLOUD_API}/firewalls/{firewall_id}/actions/set_rules"))
+        .bearer_auth(token)
+        .json(&params)
+        .send()?
+        .json()?;
+    if response.error.is_some() {
+        let e = response.error.as_ref().unwrap();
+        let error_message = format!("{}: {}, Original error details: {:?}", e.code, e.message, e.details.fields);
+        return Err(Box::new(HcloudError(error_message)));
+    }
     Ok(())
 }
 
-fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &Vec<String>, udp: &Vec<String>, ip: &String) -> Vec<FirewallRule> {
+fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &[String], udp: &[String], ips: &[String]) -> Vec<FirewallRule> {
     let mut rules: Vec<FirewallRule> = vec![];
 
     if *icmp {
@@ -184,7 +240,7 @@ fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &Vec<String>, 
             direction: "in".to_string(),
             port: None,
             protocol: "icmp".to_string(),
-            source_ips: vec![format!("{}/32", ip)],
+            source_ips: ips.to_vec(),
         })
     };
 
@@ -195,7 +251,7 @@ fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &Vec<String>, 
             direction: "in".to_string(),
             port: None,
             protocol: "gre".to_string(),
-            source_ips: vec![format!("{}/32", ip)],
+            source_ips: ips.to_vec(),
         })
     };
 
@@ -206,7 +262,7 @@ fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &Vec<String>, 
             direction: "in".to_string(),
             port: None,
             protocol: "esp".to_string(),
-            source_ips: vec![format!("{}/32", ip)],
+            source_ips: ips.to_vec(),
         })
     };
 
@@ -217,7 +273,7 @@ fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &Vec<String>, 
             direction: "in".to_string(),
             port: Some(port.to_string()),
             protocol: "tcp".to_string(),
-            source_ips: vec![format!("{}/32", ip)],
+            source_ips: ips.to_vec(),
         })
     }
 
@@ -228,7 +284,7 @@ fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &Vec<String>, 
             direction: "in".to_string(),
             port: Some(port.to_string()),
             protocol: "udp".to_string(),
-            source_ips: vec![format!("{}/32", ip)],
+            source_ips: ips.to_vec(),
         })
     }
 
