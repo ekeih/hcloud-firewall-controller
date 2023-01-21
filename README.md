@@ -43,7 +43,6 @@ Options:
 
 ## Planned Features
 - IPv6 support
-- Add static IP addresses
 - Add IP addresses based on dynamic DNS records
 - Pagination in case there are many firewalls in the Hetzner Cloud project
 
