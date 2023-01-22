@@ -1,11 +1,14 @@
 use clap::Parser;
 use env_logger::Env;
+use ipnet::IpNet;
 use log::{debug, error, info, log_enabled, Level};
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Display;
+use std::net::IpAddr;
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::{collections::HashMap, thread, time};
 
 const HCLOUD_API: &str = "https://api.hetzner.cloud/v1";
@@ -107,6 +110,10 @@ struct Config {
         env = "HFC_IP"
     )]
     ip: Vec<String>,
+    #[arg(long, help = "Disable the detection of the public IPv4 address", env = "HFC_DISABLE_IPV4")]
+    disable_ipv4: bool,
+    #[arg(long, help = "Disable the detection of the public IPv6 address", env = "HFC_DISABLE_IPV6")]
+    disable_ipv6: bool,
     #[arg(short, long, default_value_t = 60, help = "Reconciliation interval in seconds", env = "HFC_RECONCILIATION_INTERVAL")]
     reconciliation_interval: u64,
     #[arg(short, long, default_value_t = String::from("https://ip.fotoallerlei.com"), help = "Endpoint to query your public IP from", env = "HFC_IP_ENDPOINT")]
@@ -116,9 +123,12 @@ struct Config {
 fn main() -> ExitCode {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let config = Config::parse();
-    let client = Client::new();
+
+    let client4 = ClientBuilder::new().local_address(IpAddr::from_str("0.0.0.0").unwrap()).build().unwrap();
+    let client6 = ClientBuilder::new().local_address(IpAddr::from_str("::").unwrap()).build().unwrap();
+
     if config.run_once {
-        match reconcile(&config, &client) {
+        match reconcile(&config, &client4, &client6) {
             Ok(_) => debug!("Reconciliation succeeded"),
             Err(e) => {
                 error!("{e}");
@@ -126,15 +136,15 @@ fn main() -> ExitCode {
             }
         };
     } else {
-        controller(&config, &client);
+        controller(&config, &client4, &client6);
     }
     ExitCode::SUCCESS
 }
 
-fn controller(config: &Config, client: &Client) {
+fn controller(config: &Config, client4: &Client, client6: &Client) {
     loop {
         debug!("Reconciliation loop started");
-        match reconcile(config, client) {
+        match reconcile(config, client4, client6) {
             Ok(_) => debug!("Reconciliation loop finished, sleeping for {} seconds", config.reconciliation_interval),
             Err(e) => error!("{e}"),
         };
@@ -142,15 +152,15 @@ fn controller(config: &Config, client: &Client) {
     }
 }
 
-fn reconcile(config: &Config, client: &Client) -> Result<(), Box<dyn std::error::Error>> {
-    let ips = build_ips(client, &config.ip_endpoint, &config.ip)?;
+fn reconcile(config: &Config, client4: &Client, client6: &Client) -> Result<(), Box<dyn std::error::Error>> {
+    let ips = build_ips(client4, client6, &config.ip_endpoint, &config.ip, config.disable_ipv4, config.disable_ipv6)?;
     let rules = build_firewall_rules(&config.icmp, &config.gre, &config.esp, &config.tcp, &config.udp, &ips);
 
     for token in &config.hcloud_token {
-        let fw = get_or_create_firewall(client, token, &config.firewall_name)?;
+        let fw = get_or_create_firewall(client4, token, &config.firewall_name)?;
 
         if fw.rules != rules {
-            match update_hcloud_firewall(client, token, fw.id, &rules) {
+            match update_hcloud_firewall(client4, token, fw.id, &rules) {
                 Ok(_) => info!("Rules of '{}' (id: {}) have been updated for {:?}", config.firewall_name, fw.id, ips),
                 Err(e) => {
                     error!("{e}");
@@ -165,16 +175,26 @@ fn reconcile(config: &Config, client: &Client) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-fn build_ips(client: &Client, ip_endpont: &String, static_ips: &[String]) -> Result<Vec<String>, reqwest::Error> {
-    let ip = get_ip(client, ip_endpont)?;
+fn build_ips(client4: &Client, client6: &Client, ip_endpont: &String, static_ips: &[String], disable_ipv4: bool, disable_ipv6: bool) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut ips = static_ips.to_owned();
-    ips.push(ip);
+
+    if !disable_ipv4 {
+        let ip4 = get_ip(client4, ip_endpont)?;
+        ips.push(format!("{}/{}", ip4, 32));
+    }
+
+    if !disable_ipv6 {
+        let ip6 = get_ip(client6, ip_endpont)?;
+        let ip6_network = IpNet::new(ip6, 64)?;
+        ips.push(format!("{}/{}", ip6_network.network(), ip6_network.prefix_len()));
+    }
+
     ips.sort();
     Ok(ips)
 }
 
-fn get_ip(client: &Client, ip_endpont: &String) -> Result<String, reqwest::Error> {
-    Ok(format!("{}/32", client.get(ip_endpont).send()?.text()?.trim()))
+fn get_ip(client: &Client, ip_endpont: &String) -> Result<IpAddr, Box<dyn std::error::Error>> {
+    Ok(IpAddr::from_str(client.get(ip_endpont).send()?.text()?.trim())?)
 }
 
 fn get_or_create_firewall(client: &Client, token: &String, firewall_name: &String) -> Result<Firewall, reqwest::Error> {
@@ -232,6 +252,10 @@ fn update_hcloud_firewall(client: &Client, token: &String, firewall_id: u32, fir
 
 fn build_firewall_rules(icmp: &bool, gre: &bool, esp: &bool, tcp: &[String], udp: &[String], ips: &[String]) -> Vec<FirewallRule> {
     let mut rules: Vec<FirewallRule> = vec![];
+
+    if ips.is_empty() {
+        return rules;
+    }
 
     if *icmp {
         rules.push(FirewallRule {

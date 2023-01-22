@@ -31,6 +31,10 @@ Options:
           Allow ESP traffic [env: HFC_ESP=]
       --ip <STATIC IP>
           Comma separated list of static IP addresses in CIDR notation to add to all firewall rules in addition to dynamically discovered IP addresses. Alternatively the parameter can be specified multiple times. The Hetzner Cloud API requires that the IP is the network id of the specified network, so 127.0.0.0/24 would work while 127.0.0.1/24 would fail. [env: HFC_IP=]
+      --disable-ipv4
+          Disable the detection of the public IPv4 address [env: HFC_DISABLE_IPV4=]
+      --disable-ipv6
+          Disable the detection of the public IPv6 address [env: HFC_DISABLE_IPV6=]
   -r, --reconciliation-interval <RECONCILIATION_INTERVAL>
           Reconciliation interval in seconds [env: HFC_RECONCILIATION_INTERVAL=] [default: 60]
   -i, --ip-endpoint <IP_ENDPOINT>
@@ -42,7 +46,6 @@ Options:
 ```
 
 ## Planned Features
-- IPv6 support
 - Add IP addresses based on dynamic DNS records
 - Pagination in case there are many firewalls in the Hetzner Cloud project
 
