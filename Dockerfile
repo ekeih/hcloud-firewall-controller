@@ -1,4 +1,4 @@
-FROM rust:1.66.1 as builder
+FROM rust:1.67.0 as builder
 WORKDIR /usr/src/hcloud-firewall-controller
 COPY Cargo.* .
 COPY src src
