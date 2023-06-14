@@ -9,7 +9,7 @@ repository = "https://github.com/ekeih/hcloud-firewall-controller"
 version = "0.0.1"
 
 [dependencies]
-clap = { version = "4.3.3", features = ["derive", "env"] }
+clap = { version = "4.3.4", features = ["derive", "env"] }
 env_logger = "0.10.0"
 ipnet = "2.7.2"
 log = "0.4.19"
